@@ -1,0 +1,262 @@
+#include <WiFi.h>
+#include <WiFiUdp.h>
+#include "StreamIO.h"
+#include "AudioStream.h"
+#include "AudioEncoder.h"
+#include "MP4Recording.h"
+#include "VideoStream.h"
+#include "AmebaFatFS.h"
+#include <stdio.h>
+#include <time.h>
+#include "rtc.h"
+// Include GenAI last to avoid conflicts with FatFS
+#include "GenAI.h"
+
+
+// 設定初始日期時間
+#define YEAR  2025
+#define MONTH 5
+#define DAY   29
+#define HOUR 21
+#define MIN   14
+#define SEC  15
+
+
+long long seconds = 0;
+struct tm *timeinfo;
+
+
+String openAI_key = "";               // paste your generated openAI API key here
+String Gemini_key = ""; // paste your generated Gemini API key here
+String Llama_key = "";                // paste your generated Llama API key here
+char wifi_ssid[] = "";    // your network SSID (name)
+char wifi_pass[] = "";  // your network password
+
+
+WiFiSSLClient client;
+GenAI llm;
+GenAI tts;
+
+
+AmebaFatFS fs;
+String mp3Filename = "test_play_google_tts.mp3";
+
+
+VideoSetting config(768, 768, CAM_FPS, VIDEO_JPEG, 1);
+#define CHANNEL 0
+const int sensorPin = A0;      // 觸控感測器接 A0
+int sensorValue = 0;           // 感測器讀值
+const int threshold = 10;      // 判斷觸摸的門檻（依據實測調整）
+uint32_t img_addr = 0;
+uint32_t img_len = 0;
+
+
+const int A1_SENSOR_PIN = A1;  // A1 Sensor Pin
+int sensorValueA1 = 0;         // A1 sensor value
+
+
+const int A2_SENSOR_PIN = A2;  // A2 Sensor Pin (麥克風錄音觸發)
+int sensorValueA2 = 0;         // A2 sensor value
+
+
+// Audio configuration for recording
+AudioSetting configA(1);
+Audio audio;
+AAC aac;
+MP4Recording mp4;
+StreamIO audioStreamer1(1, 1);
+StreamIO audioStreamer2(1, 1);
+String audioFileName = "gemini_speech";
+int recordSeconds = 5; // Record for 5 seconds
+
+
+void initWiFi() {
+    for (int i = 0; i < 2; i++) {
+        WiFi.begin(wifi_ssid, wifi_pass);
+        delay(1000);
+        Serial.println("");
+        Serial.print("Connecting to ");
+        Serial.println(wifi_ssid);
+
+
+        uint32_t StartTime = millis();
+        while (WiFi.status() != WL_CONNECTED) {
+            delay(500);
+            if ((StartTime + 5000) < millis()) {
+                break;
+            }
+        }
+
+
+        if (WiFi.status() == WL_CONNECTED) {
+            Serial.println("");
+            Serial.println("STAIP address: ");
+            Serial.println(WiFi.localIP());
+            Serial.println("");
+            break;
+        }
+    }
+}
+
+
+// 播放音頻的函數
+void sdPlayMP3(String filename) {
+    fs.begin();
+    String filepath = String(fs.getRootPath()) + filename;
+    File file = fs.open(filepath, MP3);
+    file.setMp3DigitalVol(120);
+    file.playMp3();
+    file.close();
+    fs.end();
+}
+
+
+void setup() {
+    Serial.begin(115200);
+    rtc.Init();
+    long long epochTime = rtc.SetEpoch(YEAR, MONTH, DAY, HOUR, MIN, SEC);
+    rtc.Write(epochTime);
+    initWiFi();
+
+
+    // Camera setup
+    config.setRotation(0);
+    Camera.configVideoChannel(CHANNEL, config);
+    Camera.videoInit();
+    Camera.channelBegin(CHANNEL);
+    Camera.printInfo();
+
+
+    // Audio setup
+    audio.configAudio(configA);
+    audio.begin();
+    aac.configAudio(configA);
+    aac.begin();
+    mp4.configAudio(configA, CODEC_AAC);
+    mp4.setRecordingDuration(recordSeconds);
+    mp4.setRecordingFileCount(1);
+    mp4.setRecordingFileName(audioFileName);
+    mp4.setRecordingDataType(STORAGE_AUDIO);
+    audioStreamer1.registerInput(audio);
+    audioStreamer1.registerOutput(aac);
+    if (audioStreamer1.begin() != 0) {
+        Serial.println("StreamIO link 1 start failed");
+    }
+    audioStreamer2.registerInput(aac);
+    audioStreamer2.registerOutput(mp4);
+    if (audioStreamer2.begin() != 0) {
+        Serial.println("StreamIO link 2 start failed");
+    }
+    audio.printInfo();
+
+
+    pinMode(LED_B, OUTPUT);
+    pinMode(LED_G, OUTPUT);
+    pinMode(sensorPin, INPUT);     // A0 sensor pin
+    pinMode(A1_SENSOR_PIN, INPUT); // A1 sensor pin
+    pinMode(A2_SENSOR_PIN, INPUT); // A2 sensor pin for recording
+}
+
+
+void loop() {
+    // 讀取感測器值
+    sensorValue = analogRead(sensorPin);        // A0
+    sensorValueA1 = analogRead(A1_SENSOR_PIN);  // A1
+    sensorValueA2 = analogRead(A2_SENSOR_PIN);  // A2
+
+
+    Serial.print("A0: ");
+    Serial.print(sensorValue);
+    Serial.print("\tA1: ");
+    Serial.print(sensorValueA1);
+    Serial.print("\tA2: ");
+    Serial.println(sensorValueA2);
+
+
+    // 功能 1: A0 觸發拍照並描述
+    if (sensorValue > threshold) {
+        for (int count = 0; count < 3; count++) {
+            digitalWrite(LED_B, HIGH);
+            delay(500);
+            digitalWrite(LED_B, LOW);
+            delay(500);
+        }
+
+
+        Camera.getImage(0, &img_addr, &img_len);
+        String text = llm.geminivision(Gemini_key, "gemini-2.0-flash", "請以20字簡單說明這是哪裡", img_addr, img_len, client);
+        Serial.println(text);
+
+
+        tts.googletts(mp3Filename, text, "zh-TW");
+        delay(500);
+        sdPlayMP3(mp3Filename);
+
+
+        delay(3000);
+    }
+
+
+    // 功能 2: A1 觸發播報時間
+    if (sensorValueA1 > threshold) {
+        for (int count = 0; count < 3; count++) {
+            digitalWrite(LED_G, HIGH);
+            delay(500);
+            digitalWrite(LED_G, LOW);
+            delay(500);
+        }
+
+
+        seconds = rtc.Read();
+        timeinfo = localtime(&seconds);
+        String time_str = String(timeinfo->tm_hour) + ":" + String(timeinfo->tm_min) + ":" + String(timeinfo->tm_sec);
+        String time_message = "現在時間是 " + time_str;
+        tts.googletts(mp3Filename, time_message, "zh-TW");
+        delay(500);
+        sdPlayMP3(mp3Filename);
+
+
+        delay(3000);
+    }
+
+
+    // 功能 3: A2 觸發錄音、轉文字、Gemini 回覆並播放
+    if (sensorValueA2 > threshold) {
+    for (int count = 0; count < 3; count++) {
+        digitalWrite(LED_B, HIGH);
+        delay(500);
+        digitalWrite(LED_B, LOW);
+        delay(500);
+    }
+
+
+    Serial.println("開始錄音...");
+    mp4.begin();
+    delay((recordSeconds + 1) * 1000); // 確保錄音完成
+    mp4.end();
+    Serial.println("錄音完成");
+
+
+    // 將錄音轉為文字
+    String transcript = llm.geminiaudio(Gemini_key, audioFileName, "gemini-2.0-flash", mp4, "請將這段錄音內容轉換為文字", client);
+    if (transcript.length() > 0) {
+        Serial.println("辨識結果: " + transcript);
+
+
+        // 將轉錄文字送至 Gemini 獲取回覆
+        String reply = llm.geminitext(Gemini_key, "gemini-2.0-flash", transcript, client);
+        Serial.println("Gemini 回覆: " + reply);
+       
+        // 將回覆轉為語音並播放
+        tts.googletts(mp3Filename, reply, "zh-TW");
+        delay(500);
+        sdPlayMP3(mp3Filename);
+    } else {
+        Serial.println("錯誤：轉錄失敗");
+    }
+
+
+    delay(30000); // 去抖動
+}
+    delay(200); // 主迴圈延遲
+}
