@@ -1,0 +1,120 @@
+/*
+ * Integrated example for AMB82-mini: Scan QR code, convert text to speech, and play MP3.
+ * Scans a QR code to get a location name, uses Google Translate API for text-to-speech,
+ * and plays the resulting MP3 file from an SD card in Chinese.
+ *
+ * References:
+ * - QRCodeScanner: https://www.amebaiot.com/en/amebapro2-arduino-video-qrcode/
+ * - Text-to-Speech: https://ameba-arduino-doc.readthedocs.io/en/latest/amebapro2/Example_Guides/Neural%20Network/Text-to-Speech.html
+ * - SDCardPlayMP3: https://ameba-doc-arduino-sdk.readthedocs-hosted.com/en/latest/amebapro2/Example_Guides/Multimedia/Play%20MP3%20with%20SD%20card.html
+ */
+
+
+#include "VideoStream.h"
+#include "QRCodeScanner.h"
+#include "WiFi.h"
+#include "GenAI.h"
+#include "AmebaFatFS.h"
+
+
+#define CHANNEL 0
+#define INTERVAL 1000
+
+
+// WiFi credentials
+char ssid[] = "Wowo"; // Replace with your network SSID
+char pass[] = "my89371546";     // Replace with your network password
+
+
+// Video configuration
+VideoSetting config(CHANNEL);
+QRCodeScanner Scanner;
+AmebaFatFS fs;
+GenAI tts;
+
+
+String mp3Filename = "location_speech.mp3";
+
+
+void initWiFi() {
+    for (int i = 0; i < 2; i++) {
+        WiFi.begin(ssid, pass);
+        Serial.print("Connecting to ");
+        Serial.println(ssid);
+
+
+        uint32_t startTime = millis();
+        while (WiFi.status() != WL_CONNECTED) {
+            delay(500);
+            if ((startTime + 5000) < millis()) {
+                break;
+            }
+        }
+
+
+        if (WiFi.status() == WL_CONNECTED) {
+            Serial.println("Connected! IP address: ");
+            Serial.println(WiFi.localIP());
+            break;
+        }
+    }
+}
+
+
+void sdPlayMP3(String filename) {
+    fs.begin();
+    String filepath = String(fs.getRootPath()) + filename;
+    File file = fs.open(filepath, MP3);
+    file.setMp3DigitalVol(120);
+    file.playMp3();
+    file.close();
+    fs.end();
+}
+
+
+void setup() {
+    Serial.begin(115200);
+
+
+    // Initialize WiFi
+    initWiFi();
+
+
+    // Initialize camera
+    Camera.configVideoChannel(CHANNEL, config);
+    Camera.videoInit();
+
+
+    // Start QR code scanning
+    Scanner.StartScanning();
+}
+
+
+void loop() {
+    delay(1000);
+
+
+    // Get QR code result
+    Scanner.GetResultString();
+    Scanner.GetResultLength();
+
+
+    if (Scanner.ResultString != nullptr && Scanner.ResultLength != 0) {
+        Serial.print("Scanned Location: ");
+        Serial.println(Scanner.ResultString);
+
+
+        // Convert scanned text to speech (Chinese)
+        tts.googletts(mp3Filename, Scanner.ResultString, "zh-CN");
+        delay(500);
+
+
+        // Play the generated MP3
+        sdPlayMP3(mp3Filename);
+
+
+        // Clear result to avoid repeated processing
+        Scanner.ResultString = nullptr;
+        Scanner.ResultLength = 0;
+    }
+}
